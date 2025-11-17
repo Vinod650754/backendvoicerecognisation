@@ -1,0 +1,143 @@
+QUICK START GUIDE
+=================
+
+🚀 ONE-COMMAND SETUP (Windows PowerShell):
+
+# Terminal 1 - Backend Server
+cd C:\vscodeprojects\home_app
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r backend/requirements.txt
+python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
+
+# Terminal 2 - Flutter App (wait for backend to start first!)
+cd C:\vscodeprojects\home_app
+flutter pub get
+flutter run -v
+
+---
+
+📋 SYSTEM REQUIREMENTS:
+✓ Windows 10+ with PowerShell 5.1
+✓ Flutter 3.x (flutter --version)
+✓ Python 3.9+ (python --version)
+✓ Android SDK / Emulator
+✓ ESP32 microcontroller (with Arduino sketch)
+
+---
+
+🔧 BEFORE YOU START:
+
+1. Set Python execution policy (if needed):
+   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+2. For physical Android device (NOT emulator):
+   - Edit lib/main.dart line ~32
+   - Change backendIp from '10.0.2.2' to your PC's IP
+   - Find IP: ipconfig | grep "IPv4 Address"
+
+3. Ensure ESP32 is programmed with:
+   - Device name: ESP32_DoorLock
+   - Write characteristic UUID: 0000bbbb-0000-1000-8000-00805f9b34fb
+   - Notify characteristic UUID: 0000aaaa-0000-1000-8000-00805f9b34fb
+
+---
+
+⚙️ EXPECTED OUTPUT:
+
+Backend (Terminal 1):
+  INFO:     Uvicorn running on http://0.0.0.0:8000
+  INFO:     Application startup complete
+  [DevTools] http://127.0.0.1:8000/docs
+
+Flutter (Terminal 2):
+  Launching lib/main.dart on <device> in debug mode...
+  🔥  To hot reload changes while running, press "r"
+
+---
+
+🎯 TESTING:
+
+1. App opens → 3 tabs appear (Main, Voice Recognition, Samples)
+2. Main tab → Shows "Bluetooth Not Connected" initially
+3. App searches for ESP32_DoorLock automatically
+4. Once connected → Shows "Bluetooth Connected"
+5. Voice tab → Starts listening automatically (microphone permission)
+6. Samples tab → Collect voice samples for retraining
+
+---
+
+🐛 COMMON ISSUES:
+
+Q: App crashes on startup
+A: Enable microphone permission in Android Settings → Apps → home_app
+
+Q: "Bluetooth Not Connected" stays forever
+A: Ensure ESP32 is powered on and advertising as "ESP32_DoorLock"
+
+Q: Backend won't start (ModuleNotFoundError)
+A: Activate venv first: .\.venv\Scripts\Activate.ps1
+
+Q: App can't connect to backend
+A: - For emulator: Keep backend on 10.0.2.2:8000
+     - For device: Update BACKEND_IP in lib/main.dart to your LAN IP
+
+Q: Voice recognition not working
+A: Check microphone permission + ensure backend is running
+
+---
+
+💡 DEBUG BUTTONS (for testing without voice):
+
+In Main tab (debug mode):
+- "Simulate Wake" → Triggers wakeword detection simulation
+- "Simulate Unlock" → Sends unlock command to ESP32
+- "Simulate Lock" → Sends lock command to ESP32
+
+---
+
+📁 KEY FILES:
+
+lib/main.dart              → Flutter app (ALL UI, BLE, recording, backend calls)
+backend/app.py            → FastAPI server (ML inference)
+backend/requirements.txt   → Python dependencies
+backend/models/           → Pre-trained ML models
+README.md                 → Full documentation
+PROJECT_COMPLETION.txt    → This completion checklist
+
+---
+
+🎤 VOICE CONTROL FLOW:
+
+1. App listens continuously (1.2s clips every 1.5s)
+2. Say wakeword → Backend detects (/detect_wakeword/)
+3. Backend verifies it's you (/verify_voice/)
+4. App records command (2.5s)
+5. Backend classifies intent (/detect_command/) → "unlock" or "lock"
+6. Backend re-verifies voice
+7. If verified → Send BLE command to ESP32 → Door unlocks/locks
+
+---
+
+✅ SUCCESS INDICATORS:
+
+✓ Terminal 1: Backend running with "Application startup complete"
+✓ Terminal 2: Flutter app launched on emulator/device
+✓ App UI shows 3 tabs and Bluetooth connection status
+✓ No microphone permission errors in logcat
+✓ Can tap simulate buttons without crashes
+
+---
+
+🔒 SECURITY REMINDERS:
+
+- Never share backend IP on public internet (LAN only)
+- Voice models are sensitive; keep backup of backend/models/
+- All voice credentials handled server-side (not on device)
+- Security alerts logged to backend/alerts/ (monitor regularly)
+
+---
+
+READY TO LAUNCH! 🚀
+
+Questions? Check README.md for detailed troubleshooting.

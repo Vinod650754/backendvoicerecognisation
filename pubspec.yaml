@@ -1,0 +1,73 @@
+name: home_app
+description: "Flutter Smart Door Lock App - BLE Control, Emergency Alerts, Voice Biometrics"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Material Design UI
+  cupertino_icons: ^1.0.8
+
+  # BLE Communication with ESP32
+  flutter_blue_plus: ^2.0.0
+
+  # State Management
+  provider: ^6.1.0
+  riverpod: ^2.4.0
+  flutter_riverpod: ^2.4.0
+
+  # Permissions (microphone, BLE, notifications)
+  permission_handler: ^12.0.1
+  
+  # Device Vibration
+  vibration: ^3.1.4
+
+  # HTTP Client for Backend API calls
+  http: ^0.13.6
+  http_parser: ^4.0.2
+
+  # Audio Recording (for voice biometrics)
+  record: ^6.1.2
+
+  # File & Path utilities
+  path_provider: ^2.0.15
+
+  # Beautiful UI fonts
+  google_fonts: ^4.0.4
+
+  # Animations & Lottie
+  lottie: ^3.0.0
+
+  # Device info (get device info for security)
+  device_info_plus: ^9.1.0
+
+  # Settings & Preferences
+  shared_preferences: ^2.2.2
+
+  # Email sending (mailer for alerts)
+  mailer: ^6.0.1
+
+  # TFLite for on-device ML models
+  tflite_flutter: ^0.10.4
+
+  # UUID for unique identifiers
+  uuid: ^4.0.0
+
+  # JSON serialization
+  json_serializable: ^6.7.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+  build_runner: ^2.4.6
+
+flutter:
+  uses-material-design: true
