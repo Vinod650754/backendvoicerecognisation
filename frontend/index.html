@@ -1,0 +1,350 @@
+<!doctype html>
+<!doctype html>
+<html>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Voice Assistant Recorder & Live Tester</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 20px auto; }
+    h1 { margin-bottom: 6px }
+    .panel { border: 1px solid #ddd; padding: 12px; margin-bottom: 14px }
+    button { margin-right: 8px }
+    canvas { width: 100%; height: 80px; background: #111; display:block }
+    #recognized { white-space: pre-wrap; background:#f6f6f6; padding:8px; border-radius:4px }
+  </style>
+</head>
+<body>
+  <h1>Voice Assistant — Record & Live Test</h1>
+
+  <div class="panel">
+    <h3>1) Collect labeled samples (record and upload)</h3>
+    <label>Sample type:
+      <select id="sampleType"><option value="wakewords">Wakeword</option><option value="commands">Command</option></select>
+    </label>
+    <label>Label:
+      <select id="sampleLabel">
+        <option value="wakeword">wakeword</option>
+        <option value="noise">noise</option>
+        <option value="open_door">open_door</option>
+        <option value="close_door">close_door</option>
+      </select>
+    </label>
+    <label>Dataset:
+      <select id="sampleDataset"><option value="train">train</option><option value="test">test</option></select>
+    </label>
+    <div style="margin-top:8px">
+      <button id="recStart">Start Recording</button>
+      <button id="recStop">Stop</button>
+      <button id="uploadSample">Upload</button>
+      <span id="recordStatus"></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>2) Live assistant (always listening — say your wakeword or command)</h3>
+    <div><canvas id="wave"></canvas></div>
+    <h4>Status</h4>
+    <div id="assistantState" style="font-weight:bold;color:#0a0">(initializing...)</div>
+    <button id="testAudioBtn" style="margin-top:10px">🧪 Test Audio Upload (Debug)</button>
+    <h4>Recognized command</h4>
+    <div id="recognized">(listening...)</div>
+  </div>
+
+  <script>
+    // --- Sample collection recording/upload ---
+    let coll_mediaStream = null
+    let coll_mediaRecorder = null
+    let coll_recordedBlobs = null
+    const recStart = document.getElementById('recStart')
+    const recStop = document.getElementById('recStop')
+    const uploadBtn = document.getElementById('uploadSample')
+    const testAudioBtn = document.getElementById('testAudioBtn')
+    const recordStatus = document.getElementById('recordStatus')
+
+    recStart.addEventListener('click', async () => {
+      coll_mediaStream = await navigator.mediaDevices.getUserMedia({audio:true})
+      coll_recordedBlobs = []
+      coll_mediaRecorder = new MediaRecorder(coll_mediaStream)
+      coll_mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) coll_recordedBlobs.push(e.data) }
+      coll_mediaRecorder.start()
+      recordStatus.textContent = 'Recording...'
+    })
+    recStop.addEventListener('click', () => {
+      if (coll_mediaRecorder) { coll_mediaRecorder.stop(); recordStatus.textContent = 'Stopped' }
+    })
+    uploadBtn.addEventListener('click', async () => {
+      if (!coll_recordedBlobs || coll_recordedBlobs.length===0) { recordStatus.textContent='No recording'; return }
+      const blob = new Blob(coll_recordedBlobs, {type:'audio/wav'})
+      const fd = new FormData()
+      fd.append('file', blob, 'sample.wav')
+      fd.append('sample_type', document.getElementById('sampleType').value)
+      fd.append('label', document.getElementById('sampleLabel').value)
+      fd.append('dataset', document.getElementById('sampleDataset').value)
+      recordStatus.textContent = 'Uploading sample...'
+      try {
+        const res = await fetch('/collect_sample', {method:'POST', body: fd})
+        const j = await res.json()
+        recordStatus.textContent = JSON.stringify(j)
+      } catch (e) { recordStatus.textContent = 'Upload failed: '+e }
+    })
+    
+    // Test audio upload for debugging
+    testAudioBtn.addEventListener('click', async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({audio:true})
+        let chunks = []
+        const recorder = new MediaRecorder(stream)
+        recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data) }
+        recorder.onstop = async () => {
+          const blob = new Blob(chunks, {type: 'audio/wav'})
+          console.log(`[TEST] Recording complete: ${blob.size} bytes, type=${blob.type}`)
+          const fd = new FormData()
+          fd.append('file', blob, 'test.wav')
+          try {
+            const res = await fetch('/test_audio_upload', {method: 'POST', body: fd})
+            console.log(`[TEST] Response status: ${res.status}`)
+            const result = await res.json()
+            console.log(`[TEST] Result:`, result)
+            alert('Audio test result:\n' + JSON.stringify(result, null, 2) + '\n\nSee browser console for details.')
+          } catch (e) {
+            console.error(`[TEST] Error:`, e)
+            alert('Audio test failed: ' + e)
+          }
+          stream.getTracks().forEach(t => t.stop())
+        }
+        recorder.start()
+        recordStatus.textContent = '🎤 Recording 3 seconds for test...'
+        setTimeout(() => { recorder.stop() }, 3000)
+      } catch (e) {
+        console.error('[TEST] Failed:', e)
+        alert('Failed to start test: ' + e)
+      }
+    })
+
+    // --- Live assistant: visualize and recognize speech ---
+    const canvas = document.getElementById('wave')
+    const ctx = canvas.getContext('2d')
+    const recognized = document.getElementById('recognized')
+    const assistantState = document.getElementById('assistantState')
+    
+    let audioCtx = null, analyser = null, dataArray = null, sourceNode = null
+    let speechRec = null
+    let armed = false
+    let armTimer = null
+    const ARM_TIMEOUT = 5000  // 5 seconds
+
+    async function initializeAssistant() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({audio:true})
+        audioCtx = new (window.AudioContext||window.webkitAudioContext)()
+        analyser = audioCtx.createAnalyser(); analyser.fftSize = 2048
+        sourceNode = audioCtx.createMediaStreamSource(stream)
+        sourceNode.connect(analyser)
+        dataArray = new Uint8Array(analyser.fftSize)
+        drawWave()
+
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+        speechRec = new SpeechRecognition()
+        speechRec.lang = 'en-US'
+        // Use interim results for responsiveness
+        speechRec.interimResults = true
+        speechRec.continuous = true
+
+        let recognitionActive = false
+
+        function normText(s){ return s.toLowerCase().replace(/[^a-z0-9\s]/g,'').replace(/\s+/g,' ').trim() }
+
+        // Expanded wakeword variants — add the forms you use (e.g. "jarvis", "hello jarvis")
+        const wakePhrases = ['hey friday','hello jarvis','hey jarvis','jarvis','hello friday','hi friday','hi jarvis']
+        const openPhrases = ['open door', 'open the door', 'open', 'door open', 'please open the door', 'please open door']
+        const closePhrases = ['close door', 'close the door', 'door close', 'close', 'please close the door']
+
+        // Try exact word-boundary match first, then fallback to substring inclusion for flexible matching
+        function matchesList(text, list){
+          for (const p of list){
+            try {
+              const pat = new RegExp('\\b' + p.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&') + '\\b')
+              if (pat.test(text)) return p
+            } catch(e){ /* fallback if regex fails */ }
+          }
+          // fallback: substring check (looser)
+          for (const p of list){ if (text.indexOf(p) !== -1) return p }
+          return null
+        }
+
+        speechRec.onresult = async (ev) => {
+          for (let ri = ev.resultIndex; ri < ev.results.length; ri++){
+            const res = ev.results[ri]
+            const text = res[0].transcript
+            const normalized = normText(text)
+            const isFinal = res.isFinal
+
+            console.log('speech result', {index:ri, text, isFinal, armed})
+
+            if (!armed){
+              const w = matchesList(normalized, wakePhrases)
+              if (w){
+                // Wakeword detected - verify voice biometrically
+                assistantState.textContent = '🔐 Verifying voice...'
+                recognized.textContent = '(verifying your voice)'
+                const isOwner = await verifyVoiceWithServer(stream)
+                if (isOwner) {
+                  armed = true
+                  recognized.textContent = '(waiting for command...)'
+                  assistantState.textContent = '🎤 ARMED — listening for command... (5 s)'
+                  if (armTimer) clearTimeout(armTimer)
+                  armTimer = setTimeout(() => { disarm() }, ARM_TIMEOUT)
+                } else {
+                  recognized.textContent = '❌ Voice not verified. Please try again.'
+                  assistantState.textContent = '🎤 Listening for wakeword...'
+                }
+                break
+              }
+            } else {
+              if (isFinal){
+                // Prioritize single-word main commands 'open' and 'close' for reliability
+                const tokens = normalized.split(' ').filter(Boolean)
+                  if (tokens.includes('open') && !tokens.includes('close')){
+                    recognized.textContent = 'COMMAND: open_door (open)'
+                    try { sendCommandToServer('open_door', 'open') } catch(_){}
+                    disarm()
+                    break
+                  }
+                  if (tokens.includes('close') && !tokens.includes('open')){
+                    recognized.textContent = 'COMMAND: close_door (close)'
+                    try { sendCommandToServer('close_door', 'close') } catch(_){}
+                    disarm()
+                    break
+                  }
+                // Fallback to phrase matching (e.g. 'open the door')
+                const o = matchesList(normalized, openPhrases)
+                if (o){
+                  recognized.textContent = 'COMMAND: open_door (' + o + ')'
+                    try { sendCommandToServer('open_door', o) } catch(_){}
+                    disarm()
+                  break
+                }
+                const c = matchesList(normalized, closePhrases)
+                if (c){
+                  recognized.textContent = 'COMMAND: close_door (' + c + ')'
+                    try { sendCommandToServer('close_door', c) } catch(_){}
+                    disarm()
+                  break
+                }
+                // No command detected in final result; keep waiting until timeout
+              } else {
+                // Interim: show what recognizer hears, but don't accept as final
+                recognized.textContent = '(listening for command: ' + normalized + ')'
+              }
+            }
+          }
+        }
+
+        function disarm(){
+          armed = false
+          assistantState.textContent = '🎤 Listening for wakeword...'
+          recognized.textContent = '(listening...)'
+          if (armTimer){ clearTimeout(armTimer); armTimer = null }
+        }
+
+        speechRec.onstart = () => { recognitionActive = true; console.log('SpeechRec started') }
+        speechRec.onerror = (e) => {
+          console.warn('SpeechRec error', e)
+          if (e.error && e.error !== 'aborted' && e.error !== 'no-speech') assistantState.textContent = 'Recognition error: '+e.error
+          setTimeout(() => { try { if (!recognitionActive) speechRec.start() } catch(_){} }, 200)
+        }
+
+        speechRec.onend = () => {
+          recognitionActive = false
+          console.log('SpeechRec ended — restarting')
+          setTimeout(() => { try { if (!recognitionActive) speechRec.start() } catch(_){} }, 200)
+        }
+
+        try { speechRec.start() } catch(e){ console.warn('start failed', e) }
+        assistantState.textContent = '🎤 Listening for wakeword...'
+      } catch (e) {
+        assistantState.textContent = 'Failed to initialize: '+e.message
+      }
+    }
+
+    // Send recognized command to backend so it appears in server terminal
+    async function sendCommandToServer(command, raw){
+      try {
+        await fetch('/report_command', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({command: command, raw: raw, timestamp: Date.now()})
+        })
+      } catch (e) {
+        console.warn('Failed to report command to server', e)
+      }
+    }
+
+    // Verify voice against owner's biometric model
+    let recordedChunks = []
+    let mediaRecorder = null
+    async function verifyVoiceWithServer(stream) {
+      return new Promise((resolve) => {
+        recordedChunks = []
+        mediaRecorder = new MediaRecorder(stream)
+        mediaRecorder.ondataavailable = (e) => { 
+          if (e.data.size) {
+            recordedChunks.push(e.data)
+            console.log(`[VERIFY] Chunk: ${e.data.size} bytes, type: ${e.data.type}`)
+          }
+        }
+        mediaRecorder.onstop = async () => {
+          const blob = new Blob(recordedChunks, {type: 'audio/wav'})
+          console.log(`[VERIFY] Total blob: ${blob.size} bytes, type: ${blob.type}`)
+          const formData = new FormData()
+          formData.append('file', blob, 'verify.wav')
+          try {
+            const res = await fetch('/verify_voice', {method: 'POST', body: formData})
+            console.log(`[VERIFY] Response status: ${res.status}`)
+            if (!res.ok) {
+              const errorText = await res.text()
+              console.error(`[VERIFY] HTTP ${res.status}: ${errorText}`)
+              resolve(false)
+              return
+            }
+            const result = await res.json()
+            console.log('Voice verification result:', result)
+            resolve(result.verified === true)
+          } catch (e) {
+            console.warn('Voice verification failed:', e)
+            resolve(false)
+          }
+        }
+        mediaRecorder.start()
+        // Record for 2 seconds then stop
+        setTimeout(() => { mediaRecorder.stop() }, 2000)
+      })
+    }
+
+    function drawWave() {
+      if (!analyser) return
+      requestAnimationFrame(drawWave)
+      const w = canvas.width = canvas.clientWidth
+      const h = canvas.height = canvas.clientHeight
+      analyser.getByteTimeDomainData(dataArray)
+      ctx.fillStyle = '#111'
+      ctx.fillRect(0,0,w,h)
+      ctx.lineWidth = 2
+      ctx.strokeStyle = '#0f0'
+      ctx.beginPath()
+      const step = Math.max(1, Math.floor(dataArray.length / w))
+      for (let i=0;i<w;i++){
+        const v = dataArray[i*step]/128.0 -1.0
+        const y = (v * 0.45 + 0.5) * h
+        if (i===0) ctx.moveTo(i,y); else ctx.lineTo(i,y)
+      }
+      ctx.stroke()
+    }
+
+    // Auto-start assistant when page loads
+    window.addEventListener('load', initializeAssistant)
+  </script>
+</body>
+</html>
