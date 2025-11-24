@@ -2,6 +2,8 @@ fastapi
 uvicorn[standard]
 torch
 torchaudio
-torchaudio
 speechbrain
 soundfile
+flask
+gunicorn
+python-dotenv

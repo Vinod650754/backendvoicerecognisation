@@ -119,20 +119,23 @@ def find_first_existing(paths):
     return None
 
 
+# Get the project root directory (parent of backend directory)
+backend_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(backend_dir)
+
 # Candidate paths (environment variables take precedence)
 WAKE_ENV = os.environ.get('WAKE_MODEL_PATH')
 CMD_ENV = os.environ.get('COMMAND_MODEL_PATH')
 
-cwd = os.getcwd()
 wake_candidates = [WAKE_ENV,
-                   os.path.join(cwd, 'data', 'wakewords', 'wakeword_model.pth'),
-                   os.path.join(cwd, 'data', 'wakewords', 'wakeword_model.pth'),
-                   os.path.join(cwd, '..', 'data', 'wakewords', 'wakeword_model.pth')]
+                   os.path.join(project_root, 'data', 'wakewords', 'wakeword_model.pth'),
+                   os.path.join(project_root, 'data', 'wakeword', 'wakeword_model.pth'),
+                   os.path.join(backend_dir, 'data', 'wakewords', 'wakeword_model.pth')]
 
 cmd_candidates = [CMD_ENV,
-                  os.path.join(cwd, 'data', 'commands', 'train', 'command_model.pth'),
-                  os.path.join(cwd, 'data', 'commands', 'command_model.pth'),
-                  os.path.join(cwd, '..', 'data', 'commands', 'train', 'command_model.pth')]
+                  os.path.join(project_root, 'data', 'commands', 'train', 'command_model.pth'),
+                  os.path.join(project_root, 'data', 'command', 'command_model.pth'),
+                  os.path.join(backend_dir, 'data', 'commands', 'train', 'command_model.pth')]
 
 WAKE_PATH = find_first_existing(wake_candidates)
 CMD_PATH = find_first_existing(cmd_candidates)
@@ -149,9 +152,6 @@ biometric_labels = None
 biometric_threshold = 0.7  # Confidence threshold for voice verification
 
 try:
-    # Get the parent directory (project root) from the backend directory
-    backend_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(backend_dir)
     biometric_model_path = os.path.join(project_root, 'models', 'voice_biometric_model.h5')
     biometric_labels_path = os.path.join(project_root, 'models', 'voice_biometric_labels.json')
     
@@ -167,11 +167,13 @@ except Exception as e:
     print(f"✗ Error loading voice biometric model: {e}")
 
 # Serve frontend static files under /static and expose index at /
-frontend_dir = os.path.abspath(os.path.join(os.getcwd(), 'frontend'))
+frontend_dir = os.path.join(project_root, 'frontend')
 index_path = os.path.join(frontend_dir, 'index.html')
 if os.path.isdir(frontend_dir):
     app.mount('/static', StaticFiles(directory=frontend_dir), name='static')
     print('Serving frontend static from', frontend_dir)
+else:
+    print(f"⚠ Frontend directory not found at: {frontend_dir}")
 
 
 @app.get('/')
@@ -189,43 +191,94 @@ def health():
         'status': 'ok',
         'wake_model_loaded': bool(wake_model),
         'command_model_loaded': bool(command_model),
+        'biometric_model_loaded': bool(biometric_model),
     }
 
 
 
 @app.post('/collect_sample')
-async def collect_sample(file: UploadFile = File(...), sample_type: str = Form(...), label: str = Form(...), dataset: str = Form('train')):
-    """Save an uploaded audio sample to disk under data/<sample_type>/<dataset>/<label>/filename.wav
-    sample_type: 'wakewords' or 'commands'
+async def collect_sample(file: UploadFile = File(...), sample_type: str = Form(...), label: str = Form(...), dataset: str = Form('owner')):
+    """Save an uploaded audio sample to disk under data/<sample_type>/owner/filename.wav
+    For voice biometric, files are saved to existing structure: data/command/owner/ and data/wakeword/owner/
+    sample_type: 'wakewords' or 'commands' (will be converted to singular: 'wakeword' or 'command')
     label: for wakewords use 'wakeword' or 'noise'; for commands use 'open_door' or 'close_door'
-    dataset: 'train' or 'test'
+    dataset: 'owner' (for voice biometric) - always uses 'owner' for biometric training
     """
-    # basic validation
+    print(f"[COLLECT_SAMPLE] Received sample - type: {sample_type}, label: {label}, dataset: {dataset}")
+    
+    # Basic validation
     if sample_type not in ('wakewords', 'commands'):
         return JSONResponse({'error': 'sample_type must be wakewords or commands'}, status_code=400)
-    if dataset not in ('train', 'test'):
-        dataset = 'train'
-
-    # build target dir
-    target_dir = os.path.join(os.getcwd(), 'data', sample_type, dataset)
+    
+    # Validate label based on sample type
+    if sample_type == 'wakewords' and label not in ['wakeword', 'noise']:
+        return JSONResponse({'error': 'for wakewords, label must be "wakeword" or "noise"'}, status_code=400)
+    elif sample_type == 'commands' and label not in ['open_door', 'close_door']:
+        return JSONResponse({'error': 'for commands, label must be "open_door" or "close_door"'}, status_code=400)
+    
+    # Convert plural to singular for directory structure
     if sample_type == 'wakewords':
-        # labels expected: 'wakeword' or 'noise'
-        target_dir = os.path.join(target_dir, label)
-    else:
-        # commands: label like 'open_door' or 'close_door'
-        target_dir = os.path.join(target_dir, label)
-
-    os.makedirs(target_dir, exist_ok=True)
-
-    # save file with a timestamped name
-    import time
-    filename = f"sample_{int(time.time()*1000)}.wav"
-    dest_path = os.path.join(target_dir, filename)
-    contents = await file.read()
-    with open(dest_path, 'wb') as f:
-        f.write(contents)
-
-    return {'saved': dest_path}
+        singular_type = 'wakeword'
+    else:  # commands
+        singular_type = 'command'
+    
+    # Create necessary directories with error handling
+    try:
+        # Create directory structure: data/<type>/owner/
+        target_dir = os.path.join(project_root, 'data', singular_type, 'owner')
+        os.makedirs(target_dir, exist_ok=True)
+        
+        # Also create label-specific directory for better organization
+        label_dir = os.path.join(project_root, 'data', singular_type, 'owner', label)
+        os.makedirs(label_dir, exist_ok=True)
+        
+        print(f"[COLLECT_SAMPLE] Saving to directory: {label_dir}")
+        
+        # Generate unique filename with timestamp and label
+        import time
+        import uuid
+        filename = f"{label}_{int(time.time())}_{uuid.uuid4().hex[:8]}.wav"
+        dest_path = os.path.join(label_dir, filename)
+        
+        # Read and validate audio file
+        contents = await file.read()
+        
+        # Basic validation
+        if len(contents) < 1024:  # At least 1KB
+            return JSONResponse({'error': 'invalid audio - file too small (min 1KB)'}, status_code=400)
+        
+        # Validate audio format and content
+        try:
+            with io.BytesIO(contents) as audio_file:
+                test_data, test_sr = sf.read(audio_file)
+                if len(test_data) == 0:
+                    return JSONResponse({'error': 'invalid audio - empty audio data'}, status_code=400)
+                if test_sr < 8000 or test_sr > 48000:  # Reasonable sample rate check
+                    return JSONResponse({'error': f'invalid audio - unsupported sample rate: {test_sr}'}, status_code=400)
+                
+                # Ensure audio is not too short (at least 0.5 seconds)
+                if len(test_data) / test_sr < 0.5:
+                    return JSONResponse({'error': 'audio too short - must be at least 0.5 seconds'}, status_code=400)
+                
+                # Save the file
+                with open(dest_path, 'wb') as f:
+                    f.write(contents)
+                
+                print(f"[COLLECT_SAMPLE] Successfully saved: {dest_path}")
+                return {
+                    'saved': dest_path, 
+                    'message': f'Sample saved successfully as {label}',
+                    'duration': f"{len(test_data)/test_sr:.2f} seconds",
+                    'sample_rate': test_sr
+                }
+                
+        except Exception as e:
+            return JSONResponse({'error': f'invalid audio - {str(e)}'}, status_code=400)
+            
+    except Exception as e:
+        print(f"[COLLECT_SAMPLE] Error: {str(e)}")
+        return JSONResponse({'error': f'failed to save sample: {str(e)}'}, status_code=500)
+        return JSONResponse({'error': f'Failed to save file: {str(e)}'}, status_code=500)
 
 
 def preprocess_audio_bytes(audio_bytes):
@@ -280,15 +333,30 @@ async def detect_command(file: UploadFile = File(...)):
 
 
 def extract_mfcc_for_biometric(audio_bytes, n_mfcc=13, sr=16000):
-    """Extract MFCC features from audio bytes."""
+    """Extract MFCC features from audio bytes.
+    Handles both WAV files and raw PCM audio data.
+    """
     try:
         print(f"[DEBUG] Received audio bytes: {len(audio_bytes)} bytes, first 20: {audio_bytes[:20]}")
-        data, sr_loaded = sf.read(io.BytesIO(audio_bytes), dtype='float32')
-        print(f"[DEBUG] Loaded audio: shape={data.shape}, sr={sr_loaded}")
+        
+        # Try to read as WAV file first
+        try:
+            data, sr_loaded = sf.read(io.BytesIO(audio_bytes), dtype='float32')
+            print(f"[DEBUG] Loaded as WAV: shape={data.shape}, sr={sr_loaded}")
+        except:
+            # If WAV fails, try to interpret as raw PCM audio
+            print(f"[DEBUG] WAV format failed, trying raw PCM interpretation...")
+            # Assume 16-bit PCM, mono audio at 48kHz (common browser default)
+            data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+            data = data / 32768.0  # Normalize to [-1, 1]
+            sr_loaded = 48000  # Browser default sample rate
+            print(f"[DEBUG] Loaded as raw PCM: shape={data.shape}, sr={sr_loaded}")
+        
         if sr_loaded != sr:
             # Resample if needed
             print(f"[DEBUG] Resampling from {sr_loaded} to {sr}")
             data = librosa.resample(data, orig_sr=sr_loaded, target_sr=sr)
+        
         mfcc = librosa.feature.mfcc(y=data, sr=sr, n_mfcc=n_mfcc)
         mfcc_mean = np.mean(mfcc.T, axis=0)
         print(f"[DEBUG] MFCC shape: {mfcc_mean.reshape(1, -1).shape}")
@@ -306,6 +374,7 @@ async def verify_voice(file: UploadFile = File(...)):
     Returns: {verified: bool, confidence: float, owner: str or None}
     """
     if biometric_model is None or biometric_labels is None:
+        print("[ERROR] Biometric model or labels not loaded!")
         return JSONResponse({'error': 'voice biometric model not loaded on server'}, status_code=500)
     
     try:
@@ -313,33 +382,44 @@ async def verify_voice(file: UploadFile = File(...)):
         audio = await file.read()
         print(f"[VERIFY_VOICE] Audio data received: {len(audio)} bytes")
         
+        if len(audio) < 1000:  # Basic size check
+            print("[VERIFY_VOICE] Audio file too small")
+            return {'verified': False, 'error': 'audio too short', 'confidence': 0.0}
+            
         mfcc_feature = extract_mfcc_for_biometric(audio)
         
         if mfcc_feature is None:
             print(f"[VERIFY_VOICE] Failed to extract MFCC from audio")
-            return JSONResponse({'error': 'invalid audio - could not extract MFCC'}, status_code=400)
+            return {'verified': False, 'error': 'invalid audio - could not extract MFCC', 'confidence': 0.0}
         
         # Predict
-        predictions = biometric_model.predict(mfcc_feature, verbose=0)
-        confidence = float(np.max(predictions[0]))
-        predicted_label_idx = int(np.argmax(predictions[0]))
-        
-        # Map label index to owner name
-        owner_name = None
-        for label, idx in biometric_labels.items():
-            if idx == predicted_label_idx:
-                owner_name = label
-                break
-        
-        verified = confidence >= biometric_threshold
-        print(f"[BIOMETRIC CHECK] owner={owner_name} confidence={confidence:.4f} verified={verified}")
-        
-        return {
-            'verified': verified,
-            'confidence': confidence,
-            'owner': owner_name,
-            'threshold': biometric_threshold
-        }
+        try:
+            predictions = biometric_model.predict(mfcc_feature, verbose=0)
+            confidence = float(np.max(predictions[0]))
+            predicted_label_idx = int(np.argmax(predictions[0]))
+            
+            # Map label index to owner name
+            owner_name = None
+            for label, idx in biometric_labels.items():
+                if idx == predicted_label_idx:
+                    owner_name = label
+                    break
+            
+            # Use a higher threshold for better security (0.9 = 90% confidence)
+            verified = confidence >= 0.9
+            print(f"[BIOMETRIC CHECK] owner={owner_name} confidence={confidence:.4f} verified={verified} (threshold=0.9)")
+            
+            return {
+                'verified': verified,
+                'confidence': confidence,
+                'owner': owner_name,
+                'threshold': 0.9
+            }
+            
+        except Exception as e:
+            print(f"[VERIFY_VOICE] Prediction error: {str(e)}")
+            return {'verified': False, 'error': f'prediction error: {str(e)}', 'confidence': 0.0}
+            
     except Exception as e:
         print(f"Error in voice verification: {type(e).__name__}: {e}")
         import traceback

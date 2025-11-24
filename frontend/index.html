@@ -1,7 +1,4 @@
 <!doctype html>
-<!doctype html>
-<html>
-<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
@@ -19,7 +16,10 @@
   <h1>Voice Assistant — Record & Live Test</h1>
 
   <div class="panel">
-    <h3>1) Collect labeled samples (record and upload)</h3>
+    <h3>1) Record Owner Voice Samples (for biometric training)</h3>
+    <p style="font-size:0.9em; color:#666; margin-top:-8px; margin-bottom:8px;">
+      Record your voice for wakeword and commands. These will be saved as <strong>owner voice</strong> for biometric training.
+    </p>
     <label>Sample type:
       <select id="sampleType"><option value="wakewords">Wakeword</option><option value="commands">Command</option></select>
     </label>
@@ -31,13 +31,10 @@
         <option value="close_door">close_door</option>
       </select>
     </label>
-    <label>Dataset:
-      <select id="sampleDataset"><option value="train">train</option><option value="test">test</option></select>
-    </label>
     <div style="margin-top:8px">
       <button id="recStart">Start Recording</button>
       <button id="recStop">Stop</button>
-      <button id="uploadSample">Upload</button>
+      <button id="uploadSample">Upload (saves as owner voice)</button>
       <span id="recordStatus"></span>
     </div>
   </div>
@@ -48,6 +45,7 @@
     <h4>Status</h4>
     <div id="assistantState" style="font-weight:bold;color:#0a0">(initializing...)</div>
     <button id="testAudioBtn" style="margin-top:10px">🧪 Test Audio Upload (Debug)</button>
+    <span id="verifiedLight" title="Biometric verified" style="display:inline-block;margin-left:12px;vertical-align:middle;width:14px;height:14px;border-radius:50%;background:#777;border:1px solid #444"></span>
     <h4>Recognized command</h4>
     <div id="recognized">(listening...)</div>
   </div>
@@ -81,12 +79,13 @@
       fd.append('file', blob, 'sample.wav')
       fd.append('sample_type', document.getElementById('sampleType').value)
       fd.append('label', document.getElementById('sampleLabel').value)
-      fd.append('dataset', document.getElementById('sampleDataset').value)
-      recordStatus.textContent = 'Uploading sample...'
+      // Always use 'owner' for biometric training - backend will handle this
+      fd.append('dataset', 'owner')
+      recordStatus.textContent = 'Uploading owner voice sample...'
       try {
         const res = await fetch('/collect_sample', {method:'POST', body: fd})
         const j = await res.json()
-        recordStatus.textContent = JSON.stringify(j)
+        recordStatus.textContent = '✓ Saved as owner voice: ' + (j.saved || JSON.stringify(j))
       } catch (e) { recordStatus.textContent = 'Upload failed: '+e }
     })
     
@@ -133,7 +132,11 @@
     let speechRec = null
     let armed = false
     let armTimer = null
+    let errorCount = 0
+    let lastErrorTime = 0
     const ARM_TIMEOUT = 5000  // 5 seconds
+    const ERROR_COOLDOWN = 2000  // 2 seconds cooldown after errors
+    const MAX_ERRORS = 5  // Max consecutive errors before showing message
 
     async function initializeAssistant() {
       try {
@@ -189,8 +192,9 @@
                 // Wakeword detected - verify voice biometrically
                 assistantState.textContent = '🔐 Verifying voice...'
                 recognized.textContent = '(verifying your voice)'
-                const isOwner = await verifyVoiceWithServer(stream)
-                if (isOwner) {
+                const vw = await verifyVoiceWithServer(stream)
+                console.log('[WAKEWORD VERIFY]', vw)
+                if (vw && vw.verified) {
                   armed = true
                   recognized.textContent = '(waiting for command...)'
                   assistantState.textContent = '🎤 ARMED — listening for command... (5 s)'
@@ -206,31 +210,56 @@
               if (isFinal){
                 // Prioritize single-word main commands 'open' and 'close' for reliability
                 const tokens = normalized.split(' ').filter(Boolean)
-                  if (tokens.includes('open') && !tokens.includes('close')){
-                    recognized.textContent = 'COMMAND: open_door (open)'
-                    try { sendCommandToServer('open_door', 'open') } catch(_){}
-                    disarm()
-                    break
-                  }
-                  if (tokens.includes('close') && !tokens.includes('open')){
-                    recognized.textContent = 'COMMAND: close_door (close)'
-                    try { sendCommandToServer('close_door', 'close') } catch(_){}
-                    disarm()
-                    break
-                  }
-                // Fallback to phrase matching (e.g. 'open the door')
-                const o = matchesList(normalized, openPhrases)
-                if (o){
-                  recognized.textContent = 'COMMAND: open_door (' + o + ')'
-                    try { sendCommandToServer('open_door', o) } catch(_){}
-                    disarm()
-                  break
+                let cmdName = null, cmdLabel = null
+                
+                if (tokens.includes('open') && !tokens.includes('close')){
+                  cmdName = 'open_door'
+                  cmdLabel = 'open'
                 }
-                const c = matchesList(normalized, closePhrases)
-                if (c){
-                  recognized.textContent = 'COMMAND: close_door (' + c + ')'
-                    try { sendCommandToServer('close_door', c) } catch(_){}
+                else if (tokens.includes('close') && !tokens.includes('open')){
+                  cmdName = 'close_door'
+                  cmdLabel = 'close'
+                }
+                else {
+                  // Fallback to phrase matching (e.g. 'open the door')
+                  const o = matchesList(normalized, openPhrases)
+                  if (o){
+                    cmdName = 'open_door'
+                    cmdLabel = o
+                  }
+                  else {
+                    const c = matchesList(normalized, closePhrases)
+                    if (c){
+                      cmdName = 'close_door'
+                      cmdLabel = c
+                    }
+                  }
+                }
+                
+                if (cmdName) {
+                  // Command detected - verify voice before executing
+                  recognized.textContent = '🔐 Verifying command voice...'
+                  assistantState.textContent = '🔐 Verifying voice...'
+                  const vc = await verifyVoiceWithServer(stream)
+                  console.log('[COMMAND VERIFY]', vc)
+                  
+                  if (vc && vc.verified) {
+                    // Set light color based on command type
+                    if (cmdName === 'open_door') {
+                      setVerifiedLight('green')
+                      console.log('[SET LIGHT] GREEN for open_door')
+                    } else if (cmdName === 'close_door') {
+                      setVerifiedLight('blue')
+                      console.log('[SET LIGHT] BLUE for close_door')
+                    }
+                    recognized.textContent = `✓ COMMAND: ${cmdName} (${cmdLabel})`
+                    try { sendCommandToServer(cmdName, cmdLabel) } catch(_){}
+                    // Keep light on for 2 seconds before disarming
+                    setTimeout(() => { disarm() }, 2000)
+                  } else {
+                    recognized.textContent = '❌ Voice not verified for command.'
                     disarm()
+                  }
                   break
                 }
                 // No command detected in final result; keep waiting until timeout
@@ -247,19 +276,115 @@
           assistantState.textContent = '🎤 Listening for wakeword...'
           recognized.textContent = '(listening...)'
           if (armTimer){ clearTimeout(armTimer); armTimer = null }
+          // turn off verified indicator when disarmed
+          setVerifiedLight(false)
         }
 
-        speechRec.onstart = () => { recognitionActive = true; console.log('SpeechRec started') }
+        // Small visual indicator for successful biometric verification
+        // color can be 'green', 'blue', false/null, or a hex value
+        function setVerifiedLight(color){
+          const el = document.getElementById('verifiedLight')
+          if (!el) return
+          if (!color) {
+            el.style.background = '#777'
+            el.style.boxShadow = 'none'
+            return
+          }
+          if (color === 'green') {
+            el.style.background = '#0f0'
+            el.style.boxShadow = '0 0 6px rgba(0,255,0,0.8)'
+          } else if (color === 'blue') {
+            el.style.background = '#08f'
+            el.style.boxShadow = '0 0 6px rgba(0,120,255,0.8)'
+          } else {
+            el.style.background = color
+            el.style.boxShadow = '0 0 6px rgba(0,0,0,0.3)'
+          }
+        }
+        speechRec.onstart = () => { 
+          recognitionActive = true
+          errorCount = 0  // Reset error count on successful start
+          console.log('SpeechRec started') 
+        }
+        
         speechRec.onerror = (e) => {
           console.warn('SpeechRec error', e)
-          if (e.error && e.error !== 'aborted' && e.error !== 'no-speech') assistantState.textContent = 'Recognition error: '+e.error
-          setTimeout(() => { try { if (!recognitionActive) speechRec.start() } catch(_){} }, 200)
+          const now = Date.now()
+          
+          // Handle different error types
+          if (e.error === 'no-speech') {
+            // No-speech is normal when user isn't talking - don't treat as error
+            errorCount = Math.max(0, errorCount - 1)  // Decrease error count
+            // Silently restart without showing error
+            if (now - lastErrorTime > ERROR_COOLDOWN && !recognitionActive) {
+              setTimeout(() => { 
+                try { 
+                  if (!recognitionActive) {
+                    speechRec.start()
+                    lastErrorTime = now
+                  }
+                } catch(_){} 
+              }, 500)  // Slightly longer delay for no-speech
+            }
+          } else if (e.error === 'aborted') {
+            // Aborted is intentional - don't restart
+            recognitionActive = false
+          } else if (e.error === 'network') {
+            // Network error - show message and wait longer
+            assistantState.textContent = '⚠ Network error - check connection'
+            errorCount++
+            if (now - lastErrorTime > ERROR_COOLDOWN * 2 && !recognitionActive) {
+              setTimeout(() => { 
+                try { 
+                  if (!recognitionActive && errorCount < MAX_ERRORS) {
+                    speechRec.start()
+                    lastErrorTime = now
+                  }
+                } catch(_){} 
+              }, 1000)
+            }
+          } else {
+            // Other errors - show message
+            if (e.error !== 'not-allowed') {  // Don't spam for permission errors
+              assistantState.textContent = '⚠ Recognition error: ' + (e.error || 'unknown')
+            }
+            errorCount++
+            
+            // Only restart if not too many errors and cooldown passed
+            if (now - lastErrorTime > ERROR_COOLDOWN && !recognitionActive && errorCount < MAX_ERRORS) {
+              setTimeout(() => { 
+                try { 
+                  if (!recognitionActive) {
+                    speechRec.start()
+                    lastErrorTime = now
+                  }
+                } catch(_){} 
+              }, 500)
+            } else if (errorCount >= MAX_ERRORS) {
+              assistantState.textContent = '⚠ Too many errors - please refresh the page'
+              recognitionActive = false
+            }
+          }
         }
 
         speechRec.onend = () => {
           recognitionActive = false
-          console.log('SpeechRec ended — restarting')
-          setTimeout(() => { try { if (!recognitionActive) speechRec.start() } catch(_){} }, 200)
+          console.log('SpeechRec ended')
+          
+          // Only restart if not too many errors and cooldown passed
+          const now = Date.now()
+          if (now - lastErrorTime > ERROR_COOLDOWN && errorCount < MAX_ERRORS) {
+            setTimeout(() => { 
+              try { 
+                if (!recognitionActive) {
+                  speechRec.start()
+                  lastErrorTime = now
+                }
+              } catch(_){} 
+            }, 300)
+          } else if (errorCount >= MAX_ERRORS) {
+            assistantState.textContent = '⚠ Recognition stopped - too many errors. Please refresh.'
+          }
         }
 
         try { speechRec.start() } catch(e){ console.warn('start failed', e) }
@@ -286,16 +411,20 @@
     let recordedChunks = []
     let mediaRecorder = null
     async function verifyVoiceWithServer(stream) {
+      // Use a cloned MediaStream so the main microphone stream (used by SpeechRecognition)
+      // is not disturbed. We stop cloned tracks after recording.
+      // Returns full result object: { verified: bool, confidence: float, owner: string }
       return new Promise((resolve) => {
         recordedChunks = []
-        mediaRecorder = new MediaRecorder(stream)
-        mediaRecorder.ondataavailable = (e) => { 
-          if (e.data.size) {
+        const recStream = stream.clone()
+        const recorder = new MediaRecorder(recStream)
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size) {
             recordedChunks.push(e.data)
             console.log(`[VERIFY] Chunk: ${e.data.size} bytes, type: ${e.data.type}`)
           }
         }
-        mediaRecorder.onstop = async () => {
+        recorder.onstop = async () => {
           const blob = new Blob(recordedChunks, {type: 'audio/wav'})
           console.log(`[VERIFY] Total blob: ${blob.size} bytes, type: ${blob.type}`)
           const formData = new FormData()
@@ -306,20 +435,22 @@
             if (!res.ok) {
               const errorText = await res.text()
               console.error(`[VERIFY] HTTP ${res.status}: ${errorText}`)
-              resolve(false)
+              recStream.getTracks().forEach(t => t.stop())
+              resolve({verified: false})
               return
             }
             const result = await res.json()
             console.log('Voice verification result:', result)
-            resolve(result.verified === true)
+            recStream.getTracks().forEach(t => t.stop())
+            resolve(result)
           } catch (e) {
             console.warn('Voice verification failed:', e)
-            resolve(false)
+            recStream.getTracks().forEach(t => t.stop())
+            resolve({verified: false})
           }
         }
-        mediaRecorder.start()
-        // Record for 2 seconds then stop
-        setTimeout(() => { mediaRecorder.stop() }, 2000)
+        recorder.start()
+        setTimeout(() => { recorder.stop() }, 2000)
       })
     }
 
